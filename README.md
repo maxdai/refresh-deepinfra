@@ -96,5 +96,6 @@ const { rebuildModelsConfig, selfTest } = await import('./index.ts');
 
 ## 注意
 
-- 仓库本身不含任何密钥;`models.json` 含 apiKey,**不要**提交它
+- 仓库本身不含任何密钥;deepinfra 的 apiKey 存放在 `~/.pi/agent/auth.json`
+  (0600),`models.json` 不含密钥
 - `jsonc/` 是 vendored 第三方代码,随仓库提交以保证克隆即可用

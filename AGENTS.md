@@ -19,10 +19,15 @@
 
 - `~/.pi/agent/models.json` 的 `providers.deepinfra`:baseUrl
   `https://api.deepinfra.com/v1/openai`,api `openai-completions`,
-  apiKey 为**明文字面值**(用户确认私人设备,接受),compat:
+  **无 apiKey 字段**,compat:
   `{maxTokensField:"max_tokens", supportsStore:false, supportsDeveloperRole:false, supportsReasoningEffort:true}`。
+- apiKey 存放在 `~/.pi/agent/auth.json` 的 `deepinfra` 条目(0600 权限;
+  2026-09-04 从 models.json 迁入,实测 `pi auth check --provider deepinfra`
+  ready + 真实请求通过)。pi 解析顺序:auth.json stored credential →
+  models.json apiKey 字段 → 内建环境变量约定。旧记录"models.json 的
+  apiKey 不读 auth.json"是误判,已纠正。
 - pi-deepinfra npm 插件已从 settings.json packages 移除,完全由纯配置接管
-  (node_modules 里残留副本未被引用)。models.json 的 apiKey 不读 auth.json。
+  (node_modules 里残留副本未被引用)。
 - models 数组:104 个 chat 模型(catalog 总 189,按 tags 含 "chat" 过滤),
   2026-09-04 与线上 catalog 同步(add 0 / remove 0)。
 - `~/.pi/agent/models.json.corrupted` 是首次刷新前的备份(只建一次,不覆盖)。
