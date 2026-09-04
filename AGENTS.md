@@ -26,8 +26,8 @@
   apiKey 不读 auth.json"是误判,已纠正。
 - pi-deepinfra npm 插件已从 settings.json packages 移除,完全由纯配置接管
   (node_modules 里残留副本未被引用)。
-- models 数组:104 个 chat 模型(catalog 总 189,按 tags 含 "chat" 过滤),
-  2026-09-04 与线上 catalog 同步(add 0 / remove 0)。
+- models 数组 = DeepInfra catalog 中 tags 含 "chat" 的全量模型;每次刷新
+  即与线上 catalog 对齐(不钉具体数目,免得漂移)。
 - `~/.pi/agent/models.json.corrupted` 是首次刷新前的备份(只建一次,不覆盖)。
 - 用户常用模型:`zai-org/GLM-5.3-Flash`、`deepseek-ai/DeepSeek-V4-Flash-0731`
   (均经 deepinfra,实测可用;用户环境 PI_PROVIDER=deepinfra)。
