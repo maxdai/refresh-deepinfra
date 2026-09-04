@@ -13,7 +13,8 @@
   (由 `./install.sh` 创建;支持 --copy/--force/--uninstall,尊重
   `PI_CODING_AGENT_DIR`)。改仓库代码即生效,TUI 里 `/reload`。
 - 提交历史:`81a8908` 初始扩展 → `3dcc7de` README(pi -p 限制+设计说明)
-  → `da059f3` install.sh。
+  → `da059f3` install.sh → `c87e118` AGENTS.md → `aa30fb5` 整文件重写架构
+  (废弃 tree-aware splice)→ `c2d79ce` apiKey 迁至 auth.json(文档同步)。
 
 ## deepinfra provider 配置(用户机器现状)
 
