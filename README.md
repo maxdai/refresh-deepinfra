@@ -29,11 +29,24 @@ Pi 扩展:`/refresh-deepinfra` 用 DeepInfra 线上 catalog 刷新
 ## 安装
 
 ```bash
-git clone <repo-url> ~/refresh-deepinfra
-ln -s ~/refresh-deepinfra ~/.pi/agent/extensions/refresh-deepinfra
+git clone https://github.com/maxdai/refresh-deepinfra.git
+./refresh-deepinfra/install.sh
 ```
 
 然后在 pi 里 `/reload`。
+
+install.sh 默认把仓库**软链**进 `~/.pi/agent/extensions/refresh-deepinfra`
+(单一事实源,仓库更新即生效),支持:
+
+```
+./install.sh              # 软链安装(幂等,重复执行无害)
+./install.sh --copy       # 复制安装(不随仓库更新)
+./install.sh --force      # 替换指向别处的已有软链
+./install.sh --uninstall  # 卸载(真目录需加 --force)
+```
+
+安装过程尊重 `PI_CODING_AGENT_DIR`,检查 node >= 18,并对 vendored
+jsonc-parser 做冒烟自检;已有真目录会被移动到 `<目标>.bak-时间戳` 备份。
 
 ## 测试
 
