@@ -1,26 +1,28 @@
 /**
  * /refresh-deepinfra — 用 DeepInfra 线上 catalog 刷新 ~/.pi/agent/models.json
- * 中 providers.deepinfra.models 数组。
+ * 中 providers.deepinfra.models。
  *
- * JSON 处理全部使用 Microsoft jsonc-parser(VS Code 同款,MIT,已 vendored 到
- * ./jsonc/):解析、定位、编辑、验证,不手写任何 JSON 逻辑。
+ * 架构(2026-09-04 用户拍板):整文件读写,不拼接。
+ *   - 读:vendored jsonc-parser 宽容解析(容忍注释/尾逗号);语法错误拒写。
+ *   - 改:只赋值 providers.deepinfra.models 一个字段,其余字段原对象保留。
+ *   - 写:JSON.stringify 整文件一次写入(2 空格缩进,标准 JSON,注释不保留)。
  *
- * 安全保证:
- *   - 编辑是 tree-aware 的:jsonc-parser 定位 models 数组节点的精确字节范围,
- *     只替换该范围,文件其余字节(注释/缩进/其它 provider/其它字段)原样保留。
- *   - 写盘前 selfTest 强制校验:候选文件零解析错误、models 数量与 catalog 一致、
- *     deepinfra 的其它字段全部逐值保留、providers 集合不变。任何一项失败不写盘。
- *   - 首次写盘前把当前文件备份到 models.json.corrupted。
+ * 安全机制(任一失败不写盘):
+ *   - selfTest:候选是合法 JSON、models 数量与 catalog 一致、除
+ *     deepinfra.models 外整棵树逐值相等(其它配置不丢)。
+ *   - 首次写盘前备份到 models.json.corrupted(只建一次)。
+ *   - 同目录临时文件 + rename 原子写;写后回读再 selfTest。
  */
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { deepStrictEqual } from "node:assert";
 import { createRequire } from "node:module";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
-// Vendored jsonc-parser (Microsoft, MIT) — the single JSON tool we use.
+// Vendored jsonc-parser(Microsoft,MIT)— 读侧宽容解析
 // ---------------------------------------------------------------------------
 
 interface JsoncParseError {
@@ -29,39 +31,28 @@ interface JsoncParseError {
 	length: number;
 }
 
-interface JsoncNode {
-	type: "object" | "array" | "property" | "string" | "number" | "boolean" | "null";
-	offset: number;
-	length: number;
-	children?: JsoncNode[];
-}
-
 interface JsoncParser {
-	parseTree(
+	parse(
 		text: string,
 		errors?: JsoncParseError[],
 		options?: { allowTrailingComma?: boolean; disallowComments?: boolean },
-	): JsoncNode | undefined;
-	findNodeAtLocation(root: JsoncNode, path: Array<string | number>): JsoncNode | undefined;
-	getNodeValue(node: JsoncNode): unknown;
-	applyEdits(
-		text: string,
-		edits: Array<{ offset: number; length: number; content: string }>,
-	): string;
+	): unknown;
 }
 
 const require = createRequire(import.meta.url);
 const jsonc = require("./jsonc/main.js") as JsoncParser;
 
-const PARSE_OPTIONS = { allowTrailingComma: true, disallowComments: false } as const;
+const READ_OPTIONS = { allowTrailingComma: true } as const;
 
-function stripBom(s: string): string {
-	return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
-}
-
-/** 解析 JSONC;返回 null 表示连部分解析都失败(空文件/完全损坏)。自动剥离 UTF-8 BOM。 */
-function parse(text: string, errors: JsoncParseError[]): JsoncNode | undefined {
-	return jsonc.parseTree(stripBom(text), errors, PARSE_OPTIONS);
+/** 宽容读:剥 BOM,容忍注释/尾逗号;任何语法错误抛错,绝不返回残缺对象。 */
+export function parseConfig(text: string): Record<string, any> {
+	const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+	const errors: JsoncParseError[] = [];
+	const value = jsonc.parse(body, errors, READ_OPTIONS);
+	if (errors.length > 0 || value === undefined || typeof value !== "object" || value === null) {
+		throw new Error(`models.json 解析失败(${errors.length} 个语法错误)`);
+	}
+	return value as Record<string, any>;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,131 +125,80 @@ async function fetchCatalog(signal?: AbortSignal): Promise<ModelsJsonModel[]> {
 }
 
 // ---------------------------------------------------------------------------
-// 核心:tree-aware 替换 models 数组
+// 整文件重写:只换 providers.deepinfra.models,其余字段原对象保留
 // ---------------------------------------------------------------------------
 
-/** 提取 provider 节点下除 models 外的所有属性(key → JSON 值字符串),用于字段保留比对。 */
-function getProviderProps(tree: JsoncNode, providerId: string): Map<string, string> {
-	const props = new Map<string, string>();
-	const providerNode = jsonc.findNodeAtLocation(tree, ["providers", providerId]);
-	if (!providerNode || providerNode.type !== "object") return props;
-	for (const child of providerNode.children ?? []) {
-		const keyNode = child.children?.[0];
-		const valueNode = child.children?.[1];
-		if (!keyNode || !valueNode) continue;
-		const key = jsonc.getNodeValue(keyNode);
-		if (key === "models") continue; // models 是被替换的目标
-		props.set(key, JSON.stringify(jsonc.getNodeValue(valueNode)));
+export function rebuildModelsConfig(originalText: string, liveModels: ModelsJsonModel[]): string {
+	const config = parseConfig(originalText);
+	const deepinfra = (config.providers as any)?.[DEEPINFRA_PROVIDER_ID];
+	if (!deepinfra || typeof deepinfra !== "object" || Array.isArray(deepinfra)) {
+		throw new Error(`models.json 中找不到 providers.${DEEPINFRA_PROVIDER_ID} 对象`);
 	}
-	return props;
-}
-
-function getProviderNames(tree: JsoncNode): string[] {
-	const names: string[] = [];
-	const providersNode = jsonc.findNodeAtLocation(tree, ["providers"]);
-	if (!providersNode || providersNode.type !== "object") return names;
-	for (const child of providersNode.children ?? []) {
-		const keyNode = child.children?.[0];
-		if (keyNode) names.push(String(jsonc.getNodeValue(keyNode)));
-	}
-	return names.sort();
-}
-
-/**
- * 替换 providers.deepinfra.models 数组,其余字节原样保留。
- * 失败(找不到节点/不是数组)抛错,绝不产生半成品。
- */
-function spliceModelsArray(originalText: string, newModelsJson: string): string {
-	const hadBom = originalText.charCodeAt(0) === 0xfeff;
-	const text = stripBom(originalText);
-
-	const errors: JsoncParseError[] = [];
-	const tree = parse(text, errors);
-	if (!tree) {
-		throw new Error(`models.json 无法解析(${errors.length} 个错误,文件可能严重损坏)`);
-	}
-
-	const modelsNode = jsonc.findNodeAtLocation(tree, ["providers", DEEPINFRA_PROVIDER_ID, "models"]);
-	if (!modelsNode) {
-		throw new Error(`models.json 中找不到 providers.${DEEPINFRA_PROVIDER_ID}.models 节点`);
-	}
-	if (modelsNode.type !== "array") {
-		throw new Error(`providers.${DEEPINFRA_PROVIDER_ID}.models 不是数组(实际类型 ${modelsNode.type})`);
-	}
-
-	let candidate = jsonc.applyEdits(text, [
-		{ offset: modelsNode.offset, length: modelsNode.length, content: newModelsJson },
-	]);
-
-	// 源文件若曾被错误编辑留下 stray 括号([[...]] 或 [...]]]),tree 只覆盖到
-	// 平衡的数组边界,多余的一个括号会留在边界外。只在 splice 边界清理这一个字符。
-	const close = modelsNode.offset + newModelsJson.length - 1; // 新数组的闭括号位置
-	if (candidate[close] === "]" && candidate[close + 1] === "]") {
-		candidate = candidate.slice(0, close + 1) + candidate.slice(close + 2);
-	}
-	if (
-		modelsNode.offset > 0 &&
-		candidate[modelsNode.offset] === "[" &&
-		candidate[modelsNode.offset - 1] === "["
-	) {
-		candidate = candidate.slice(0, modelsNode.offset - 1) + candidate.slice(modelsNode.offset);
-	}
-
-	return hadBom ? "\uFEFF" + candidate : candidate;
+	deepinfra.models = liveModels;
+	return JSON.stringify(config, null, 2) + "\n";
 }
 
 // ---------------------------------------------------------------------------
 // 写盘前强制 self-test;返回 null 表示通过,否则返回失败原因
 // ---------------------------------------------------------------------------
 
-function selfTest(
-	originalText: string,
-	candidateText: string,
-	expectedCount: number,
-): string | null {
-	// 1. 候选必须零错误解析。
-	const candErrors: JsoncParseError[] = [];
-	const candTree = parse(candidateText, candErrors);
-	if (!candTree) return "候选文件无法解析";
-	if (candErrors.length > 0) return `候选文件有 ${candErrors.length} 个解析错误`;
+function eq(a: unknown, b: unknown): boolean {
+	try {
+		deepStrictEqual(a, b);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
-	// 2. models 数组存在且数量与 catalog 一致。
-	const candModelsNode = jsonc.findNodeAtLocation(candTree, [
-		"providers",
-		DEEPINFRA_PROVIDER_ID,
-		"models",
-	]);
-	if (!candModelsNode || candModelsNode.type !== "array") {
-		return "候选文件缺少 providers.deepinfra.models 数组";
-	}
-	const candModels = jsonc.getNodeValue(candModelsNode);
-	if (!Array.isArray(candModels) || candModels.length !== expectedCount) {
-		return `models 数量不符:期望 ${expectedCount},实际 ${Array.isArray(candModels) ? candModels.length : "非数组"}`;
-	}
-	if (candModels[0]?.id === undefined) return "候选 models 第一项缺少 id";
-
-	// 3. deepinfra 除 models 外的所有字段逐值保留(provider 必须存在,但允许只有 models 一个键)。
-	const origErrors: JsoncParseError[] = [];
-	const origTree = parse(originalText, origErrors);
-	if (!origTree) return "原文件无法解析,拒绝覆写";
-	const origProviderNode = jsonc.findNodeAtLocation(origTree, ["providers", DEEPINFRA_PROVIDER_ID]);
-	if (!origProviderNode || origProviderNode.type !== "object") {
-		return "原文件中缺少 providers.deepinfra 对象";
-	}
-	const origProps = getProviderProps(origTree, DEEPINFRA_PROVIDER_ID);
-	const candProps = getProviderProps(candTree, DEEPINFRA_PROVIDER_ID);
-	for (const [key, value] of origProps) {
-		if (candProps.get(key) !== value) {
-			return `字段 ${key} 被改变(原 ${value.slice(0, 40)},新 ${candProps.get(key)?.slice(0, 40) ?? "缺失"})`;
-		}
+export function selfTest(originalText: string, candidateText: string, expectedCount: number): string | null {
+	// 1. 候选必须是零瑕疵的标准 JSON(写出去的就是纯 JSON)
+	let cand: Record<string, any>;
+	try {
+		cand = JSON.parse(candidateText);
+	} catch {
+		return "候选文件不是合法 JSON";
 	}
 
-	// 4. providers 集合不变(不丢也不增)。
-	const origProviders = getProviderNames(origTree);
-	const candProviders = getProviderNames(candTree);
-	if (JSON.stringify(origProviders) !== JSON.stringify(candProviders)) {
-		return `providers 集合改变:原 [${origProviders}],新 [${candProviders}]`;
+	// 2. models 数组存在、数量与 catalog 一致
+	const models = cand?.providers?.deepinfra?.models;
+	if (!Array.isArray(models)) return "候选缺少 providers.deepinfra.models 数组";
+	if (models.length !== expectedCount) {
+		return `models 数量不符:期望 ${expectedCount},实际 ${models.length}`;
 	}
+	if (models[0]?.id === undefined) return "候选 models 第一项缺少 id";
+
+	// 3. 原文件必须可解析(否则拒绝覆写)
+	let orig: Record<string, any>;
+	try {
+		orig = parseConfig(originalText);
+	} catch {
+		return "原文件无法解析,拒绝覆写";
+	}
+
+	// 4. 除 deepinfra.models 外整棵树逐值相等(其它配置不丢)
+	const origTop = { ...orig };
+	const candTop = { ...cand };
+	const origProviders = origTop.providers;
+	const candProviders = candTop.providers;
+	delete origTop.providers;
+	delete candTop.providers;
+	if (!eq(origTop, candTop)) return "providers 之外的顶层字段被改变";
+	if (!origProviders || typeof origProviders !== "object") return "原文件缺 providers";
+	const keySet = (o: object) => Object.keys(o).sort().join(",");
+	if (keySet(candProviders) !== keySet(origProviders)) {
+		return `providers 集合改变:原 [${keySet(origProviders)}],新 [${keySet(candProviders)}]`;
+	}
+	for (const name of Object.keys(origProviders)) {
+		if (name === DEEPINFRA_PROVIDER_ID) continue;
+		if (!eq(candProviders?.[name], origProviders[name])) return `provider ${name} 被改变`;
+	}
+	if (!origProviders[DEEPINFRA_PROVIDER_ID] || typeof origProviders[DEEPINFRA_PROVIDER_ID] !== "object") {
+		return "原文件缺 providers.deepinfra 对象";
+	}
+	const { models: _om, ...origDeep } = origProviders[DEEPINFRA_PROVIDER_ID];
+	const { models: _cm, ...candDeep } = candProviders?.[DEEPINFRA_PROVIDER_ID] ?? {};
+	if (!eq(candDeep, origDeep)) return "deepinfra 除 models 外的字段被改变";
 
 	return null;
 }
@@ -268,7 +208,7 @@ function selfTest(
 // ---------------------------------------------------------------------------
 
 // 供测试直接加载真实实现(jiti import;pi 运行时只消费 default 导出,不受影响)
-export { spliceModelsArray, selfTest, getProviderProps, getProviderNames };
+export { rebuildModelsConfig, selfTest, parseConfig };
 
 let tmpSeq = 0; // 同进程内连发两次命令也不会互踩同一个临时文件
 
@@ -280,7 +220,7 @@ export default function (pi: ExtensionAPI): void {
 			const configPath = path.join(agentDir, "models.json");
 			const backupPath = path.join(agentDir, "models.json.corrupted");
 
-			// 1. 拉线上 catalog
+			// 1. 拉线上 catalog(故意在读文件之前,缩小竞态窗口)
 			let liveModels: ModelsJsonModel[];
 			try {
 				liveModels = await fetchCatalog(ctx.signal);
@@ -308,10 +248,10 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 
-			// 3. tree-aware 替换
+			// 3. 整文件重写(只换 deepinfra.models)
 			let candidate: string;
 			try {
-				candidate = spliceModelsArray(originalText, JSON.stringify(liveModels));
+				candidate = rebuildModelsConfig(originalText, liveModels);
 			} catch (err) {
 				ctx.ui.notify(
 					`refresh-deepinfra: ${err instanceof Error ? err.message : String(err)}。文件未修改。`,
@@ -365,14 +305,14 @@ export default function (pi: ExtensionAPI): void {
 				}
 			} catch (err) {
 				ctx.ui.notify(
-					`refresh-deepinfra: 回读验证失败: ${err instanceof Error ? err.message : String(err)}`, 
+					`refresh-deepinfra: 回读验证失败: ${err instanceof Error ? err.message : String(err)}`,
 					"error",
 				);
 				return;
 			}
 
 			ctx.ui.notify(
-				`refresh-deepinfra: 已写入 ${liveModels.length} 个模型(其它字段原样保留)。/reload 后生效。`,
+				`refresh-deepinfra: 已写入 ${liveModels.length} 个模型,models.json 已重写为标准 JSON。/reload 后生效。`,
 				"info",
 			);
 		},

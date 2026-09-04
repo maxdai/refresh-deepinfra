@@ -32,17 +32,23 @@
 ## 扩展安全机制(不要弱化)
 
 按顺序:fetch catalog(**故意在读文件之前**,缩小竞态窗口)→ 读 models.json
-快照 → jsonc-parser tree-aware 替换 models 数组字节范围 → selfTest
-(候选零解析错误、模型数量与 catalog 一致、deepinfra 其它字段逐值保留、
-providers 集合不变;任一失败不写盘)→ 首次备份 → 同目录临时文件 + rename
+→ jsonc-parser 宽容解析整文件(容忍注释/尾逗号;语法错误拒写)→ 只对
+providers.deepinfra.models 赋值 → JSON.stringify 整文件(2 空格 + 末尾换行)
+→ selfTest(候选是合法 JSON、models 数量与 catalog 一致、除 deepinfra.models
+外整棵树逐值相等;任一失败不写盘)→ 首次备份 → 同目录临时文件 + rename
 原子写(临时文件名带 process.pid + 自增序号,防同进程连发互踩)→ 写后回读
 再 selfTest。
 
 ## 已定设计决策(不要推翻)
 
-- JSON 解析/定位/编辑/验证**全部**用 vendored 的 Microsoft jsonc-parser
-  (`./jsonc/`,3.3.1,MIT,附 LICENSE.md),不手写任何 JSON 逻辑。用户明确
-  要求成熟标准工具。
+- **整文件读写,不拼接**(2026-09-04 用户拍板):models.json 就是一个 JSON,
+  读宽容(vendored jsonc-parser,容忍注释/尾逗号),写纯 JSON(JSON.stringify
+  整文件一次写入,2 空格缩进,注释不保留)。tree-aware 原位 splice 已删除,
+  不要加回。
+- JSON 解析只允许两种工具:vendored jsonc-parser(宽容读)与标准
+  JSON.parse/stringify;比较用 assert.deepStrictEqual。**禁止手拼 JSON 文本**
+  (含调试/夹具);工具不合适就找合适工具,找不到合规路径必须停下报告由
+  用户选择,不得私自变通(2026-09-04 用户立规)。
 - `package.json` **不能加 `"type":"module"`**:会把 UMD 的 `jsonc/main.js`
   当 ESM 解析,`module.exports` 丢失,扩展直接失效(踩过的坑)。
 - `thinkingLevelMap: { off: "none" }`(reasoning 模型)是必要设计:实测
@@ -50,7 +56,6 @@ providers 集合不变;任一失败不写盘)→ 首次备份 → 同目录临�
   minimal/low/medium/high/max 全部被接受(GLM-5.3-Flash 和
   DeepSeek-V4-Flash-0731 双模型实测)。
 - 写盘前重读比对的"竞态防线"被用户否决(无必要且关不死窗口),不要加回。
-- straying bracket(`[[`/`]]`)只在 splice 边界清理一个字符,不动文件其它位置。
 
 ## 已知问题(pi 本体,非本插件)
 
@@ -59,7 +64,7 @@ magic-context 的 `/ctx-status`):handler 完整执行、副作用生效,但进�
 不退出(只能 timeout 杀),且零输出(print 模式扩展 UI 是 noOpUIContext,
 notify 被吞;扩展命令不触发 LLM 回合)。TUI 完全正常。已写入 README,
 未向上游报告。**因此脚本化刷新不要走 `pi -p`**;如需要,用 jiti 直接加载
-`index.ts` 的 `spliceModelsArray`/`selfTest` 纯函数(`test/run-tests.cjs`
+`index.ts` 的 `rebuildModelsConfig`/`selfTest` 纯函数(`test/run-tests.cjs`
 就是范例),或未来加独立 CLI 入口(用户暂缓,留作可能性)。
 
 ## 测试
@@ -67,13 +72,16 @@ notify 被吞;扩展命令不触发 LLM 回合)。TUI 完全正常。已写入 R
 `npm test` = `test/run-tests.cjs`,22 项回归。先 `npm install --ignore-scripts`
 (devDep 仅 jiti 2.7.0)。测试用 jiti 加载**真实 index.ts**(非副本),拉真实
 catalog,对真实 `~/.pi/agent/models.json` 做 dry-run,**从不写盘**。覆盖:
-标准/字段顺序/损坏([[ 与 ]])/JSONC 注释/trailing comma/BOM/多 provider/
-headers+modelOverrides/1000 模型压力/5 种非法结构抛错/原子写+回读模拟/
-截断损坏被拦截/models-only provider 不误拒。修改代码后必须跑。
+注释/尾逗号读容忍写剥离、BOM、键序保留、多 provider、1000 模型压力、
+损坏拒写(`[[` 是合法嵌套数组整体接管;stray `]]` 拒绝)、原子写+回读模拟、
+幂等、截断损坏拦截、数量不符拦截、models-only provider 不误拒。
+修改代码后必须跑。
 
 ## 历史教训(本仓库诞生过程中踩过的)
 
-不要手写 JSON 解析/编辑逻辑(手写 splice 连环产生损坏文件);不要没测完
-就让用户运行(用户明确说过"不要让我一次一次去碰壁");测试要加载真实代码
-并核对称谓("应抛错"因错误原因通过是假绿);e2e 要捕获退出码(管道 head
-会掩盖挂起);不擅自改用户全局配置。
+不要手写 JSON 解析/编辑逻辑(手写 splice 连环产生损坏文件;2026-09-04 进一步
+裁定:绕开工具的周边手写逻辑也不接受——工具不合适就换工具,无合规路径
+先停下报告由用户选择);不要没测完就让用户运行(用户明确说过"不要让我
+一次一次去碰壁");测试要加载真实代码并核对称谓("应抛错"因错误原因通过
+是假绿);e2e 要捕获退出码(管道 head 会掩盖挂起);不擅自改用户全局配置;
+先给最小可行改动让用户看真实输出,不要预判用户不满意而自行升级方案。
