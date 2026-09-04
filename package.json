@@ -1,0 +1,12 @@
+{
+  "name": "pi-refresh-deepinfra",
+  "version": "0.1.0",
+  "description": "Pi extension: /refresh-deepinfra refreshes providers.deepinfra.models in ~/.pi/agent/models.json from the live DeepInfra catalog",
+  "private": true,
+  "scripts": {
+    "test": "node test/run-tests.cjs"
+  },
+  "devDependencies": {
+    "jiti": "2.7.0"
+  }
+}
