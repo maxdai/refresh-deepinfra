@@ -59,6 +59,11 @@ providers.deepinfra.models 赋值 → JSON.stringify 整文件(2 空格 + 末尾
   minimal/low/medium/high/max 全部被接受(GLM-5.3-Flash 和
   DeepSeek-V4-Flash-0731 双模型实测)。
 - 写盘前重读比对的"竞态防线"被用户否决(无必要且关不死窗口),不要加回。
+- maxTokens 取 catalog 的 `metadata.max_tokens`(2026-09-04 用户拍板维持现状):
+  该字段在上游端点就是 context_length 的镜像(全部相等),真实 Max Output
+  只在模型网页的 `max_output_tokens` 里(如 GLM-5.3-Flash 131072 vs
+  1048576)。实测发大值无功能危害(服务端硬上限 10,000,000,按需生成);
+  抓网页补真值的方案已评估并否决(105 个请求/50MB/依赖 HTML 结构)。
 
 ## 已知问题(pi 本体,非本插件)
 
